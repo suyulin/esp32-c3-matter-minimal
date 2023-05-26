@@ -2,12 +2,13 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use embedded_svc::wifi::{self, Configuration, Wifi};
+use embedded_svc::wifi::{self, AuthMethod, ClientConfiguration, Configuration, Wifi};
 use esp_idf_hal::peripheral;
 use esp_idf_hal::prelude::Peripherals;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::netif::{EspNetif, EspNetifWait};
-use esp_idf_svc::wifi::{EspWifi, WifiWait};
+use esp_idf_svc::netif::EspNetif;
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use log::*;
 use matter::data_model::cluster_basic_information::BasicInfoConfig;
 use matter::data_model::cluster_on_off::OnOffCluster;
@@ -19,8 +20,8 @@ use ws2812_esp32_rmt_driver::Ws2812Esp32Rmt;
 
 mod dev_att;
 
-const SSID: &str = "network";
-const PASSWORD: &str = "password";
+const SSID: &str = "lzy";
+const PASSWORD: &str = "12345678";
 
 fn main() -> anyhow::Result<()> {
     esp_idf_sys::link_patches();
@@ -34,14 +35,20 @@ fn main() -> anyhow::Result<()> {
 
     let peripherals = Peripherals::take().unwrap();
     let sysloop = EspSystemEventLoop::take()?;
-
+    // let nvs = EspDefaultNvsPartition::take()?;
     info!("free memory: {}", unsafe {
         esp_idf_sys::esp_get_free_heap_size()
     });
+    let mut wifi = BlockingWifi::wrap(
+        EspWifi::new(peripherals.modem, sysloop.clone(), None)?,
+        sysloop,
+    )?;
 
-    info!("Starting Wi-Fi!");
-    let _espwifi = start_wifi(peripherals.modem, sysloop, SSID, PASSWORD)?;
-    info!("Wi-Fi started");
+    connect_wifi(&mut wifi)?;
+    info!("wifi connected");
+    // info!("Starting Wi-Fi!");
+    // let _espwifi = start_wifi(peripherals.modem, sysloop, SSID, PASSWORD)?;
+    // info!("Wi-Fi started");
 
     // This is needed for async-io, otherwise we get error:
     // thread 'main' panicked at 'cannot initialize I/O event notification: Kind(Other)
@@ -56,12 +63,12 @@ fn main() -> anyhow::Result<()> {
     });
 
     // Peripherals
-    let mut ws2812 = Ws2812Esp32Rmt::new(0, 8).unwrap();
-    ws2812
-        .write([RGB8 { r: 0, g: 1, b: 1 }].into_iter())
-        .unwrap();
+    // let mut ws2812 = Ws2812Esp32Rmt::new(0, 8).unwrap();
+    // ws2812
+    //     .write([RGB8 { r: 0, g: 1, b: 1 }].into_iter())
+    //     .unwrap();
 
-    let comm_data = CommissioningData {
+    let comm_data: CommissioningData = CommissioningData {
         // TODO: Hard-coded for now
         verifier: VerifierData::new_with_pw(123456),
         discriminator: 250,
@@ -80,7 +87,7 @@ fn main() -> anyhow::Result<()> {
         device_name: "OnOff Light".to_string(),
     };
 
-    let dev_att = Box::new(dev_att::HardCodedDevAtt::new());
+    let dev_att: Box<dev_att::HardCodedDevAtt> = Box::new(dev_att::HardCodedDevAtt::new());
 
     let mut matter =
         core::Matter::new(dev_info, dev_att, comm_data).expect("Unable to start matter");
@@ -90,23 +97,23 @@ fn main() -> anyhow::Result<()> {
         let endpoint_shelf1 = node.add_endpoint(DEV_TYPE_ON_OFF_LIGHT).unwrap();
         let mut shelf1_cluster = OnOffCluster::new().unwrap();
         let callback_shelf1_on = Box::new(|| {
-            let mut ws2812 = Ws2812Esp32Rmt::new(0, 8).unwrap();
-            ws2812
-                .write(
-                    [RGB8 {
-                        r: 255,
-                        g: 255,
-                        b: 255,
-                    }]
-                    .into_iter(),
-                )
-                .unwrap();
+            // let mut ws2812 = Ws2812Esp32Rmt::new(0, 8).unwrap();
+            // ws2812
+            //     .write(
+            //         [RGB8 {
+            //             r: 255,
+            //             g: 255,
+            //             b: 255,
+            //         }]
+            //         .into_iter(),
+            //     )
+            //     .unwrap();
         });
         let callback_shelf1_off = Box::new(|| {
-            let mut ws2812 = Ws2812Esp32Rmt::new(0, 8).unwrap();
-            ws2812
-                .write([RGB8 { r: 0, g: 0, b: 0 }].into_iter())
-                .unwrap();
+            // let mut ws2812 = Ws2812Esp32Rmt::new(0, 8).unwrap();
+            // ws2812
+            //     .write([RGB8 { r: 0, g: 0, b: 0 }].into_iter())
+            //     .unwrap();
         });
         shelf1_cluster.add_callback(
             matter::data_model::cluster_on_off::Commands::On,
@@ -137,48 +144,70 @@ fn main() -> anyhow::Result<()> {
 /// TODO: This presumes that the wifi SSID is already known.
 /// The correct approach would be to start Matter, enter provisioning mode,
 /// and then only start wifi after provisioning.
-fn start_wifi(
-    modem: impl peripheral::Peripheral<P = esp_idf_hal::modem::Modem> + 'static,
-    sysloop: EspSystemEventLoop,
-    ssid: &str,
-    password: &str,
-) -> Result<Box<EspWifi<'static>>> {
-    let mut wifi = Box::new(EspWifi::new(modem, sysloop.clone(), None)?);
-    let config = wifi::ClientConfiguration {
-        ssid: ssid.into(),
-        password: password.into(),
-        channel: None, // TODO
-        ..Default::default()
-    };
-    wifi.set_configuration(&Configuration::Client(config))?;
+// fn start_wifi(
+//     modem: impl peripheral::Peripheral<P = esp_idf_hal::modem::Modem> + 'static,
+//     sysloop: EspSystemEventLoop,
+//     ssid: &str,
+//     password: &str,
+// ) -> Result<Box<EspWifi<'static>>> {
+//     let mut wifi = Box::new(EspWifi::new(modem, sysloop.clone(), None)?);
+//     let config = wifi::ClientConfiguration {
+//         ssid: ssid.into(),
+//         password: password.into(),
+//         channel: None, // TODO
+//         ..Default::default()
+//     };
+//     wifi.set_configuration(&Configuration::Client(config))?;
+
+//     wifi.start()?;
+
+//     info!("Starting wifi...");
+
+//     if !WifiWait::new(&sysloop)?
+//         .wait_with_timeout(Duration::from_secs(20), || wifi.is_started().unwrap())
+//     {
+//         bail!("Wifi did not start");
+//     }
+
+//     info!("Connecting wifi...");
+
+//     wifi.connect()?;
+
+//     if !EspNetifWait::new::<EspNetif>(wifi.sta_netif(), &sysloop)?.wait_with_timeout(
+//         Duration::from_secs(20),
+//         || {
+//             wifi.is_connected().unwrap()
+//                 && wifi.sta_netif().get_ip_info().unwrap().ip != Ipv4Addr::new(0, 0, 0, 0)
+//         },
+//     ) {
+//         bail!("Wifi did not connect or did not receive a DHCP lease");
+//     }
+
+//     let ip_info = wifi.sta_netif().get_ip_info()?;
+
+//     info!("Wifi DHCP info: {:?}", ip_info);
+
+//     Ok(wifi)
+// }
+fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {
+    let wifi_configuration: Configuration = Configuration::Client(ClientConfiguration {
+        ssid: "lzy".into(),
+        bssid: None,
+        auth_method: AuthMethod::WPA2Personal,
+        password: "12345678".into(),
+        channel: None,
+    });
+
+    wifi.set_configuration(&wifi_configuration)?;
 
     wifi.start()?;
-
-    info!("Starting wifi...");
-
-    if !WifiWait::new(&sysloop)?
-        .wait_with_timeout(Duration::from_secs(20), || wifi.is_started().unwrap())
-    {
-        bail!("Wifi did not start");
-    }
-
-    info!("Connecting wifi...");
+    info!("Wifi started");
 
     wifi.connect()?;
+    info!("Wifi connected");
 
-    if !EspNetifWait::new::<EspNetif>(wifi.sta_netif(), &sysloop)?.wait_with_timeout(
-        Duration::from_secs(20),
-        || {
-            wifi.is_connected().unwrap()
-                && wifi.sta_netif().get_ip_info().unwrap().ip != Ipv4Addr::new(0, 0, 0, 0)
-        },
-    ) {
-        bail!("Wifi did not connect or did not receive a DHCP lease");
-    }
+    wifi.wait_netif_up()?;
+    info!("Wifi netif up");
 
-    let ip_info = wifi.sta_netif().get_ip_info()?;
-
-    info!("Wifi DHCP info: {:?}", ip_info);
-
-    Ok(wifi)
+    Ok(())
 }

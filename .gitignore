@@ -2,3 +2,4 @@
 /.embuild
 /target
 run_*.sh
+/.idea
